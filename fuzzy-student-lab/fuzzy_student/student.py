@@ -1,5 +1,13 @@
 """Нечёткая величина с функцией принадлежности вида распределения Стьюдента.
 
+Источник — [3] Абчук В.А. и др. Справочник по исследованию операций, 1979,
+табл. 2.2.5, с. 70–71. Плотность распределения Стьюдента с k степенями свободы:
+
+    S_k(t) = Γ((k+1)/2) / (√(kπ)·Γ(k/2)) · (1 + t²/k) ^ (-(k+1)/2),   -∞ < t < +∞.
+
+Для функции принадлежности нормирующий множитель отброшен (тогда max μ = 1),
+и введены сдвиг x0 и масштаб s: t = (x - x0) / s, ν = k.
+
 Функция принадлежности (плотность t-распределения, нормированная к max = 1):
 
     μ(x) = (1 + ((x - x0) / s)^2 / ν) ^ (-(ν + 1) / 2)
@@ -52,8 +60,8 @@ class StudentFuzzy:
             raise ValueError("центр x0 должен быть конечным числом")
         if not (math.isfinite(s) and s > 0):
             raise ValueError("масштаб s должен быть больше 0")
-        if not (math.isfinite(nu) and nu > 0):
-            raise ValueError("число степеней свободы ν должно быть больше 0")
+        if not (math.isfinite(nu) and nu >= 1):
+            raise ValueError("число степеней свободы ν должно быть не меньше 1")
         self.x0, self.s, self.nu = x0, s, nu
         self.name = name
 
@@ -101,11 +109,31 @@ class StudentFuzzy:
         return self.x0
 
     def sample(self, size=None, rng=None):
-        """Случайное значение по закону Стьюдента: x0 + s · Z / sqrt(χ²_ν / ν)."""
+        """Случайное значение по закону Стьюдента.
+
+        Способ из [3], табл. 2.2.5, с. 71: моделируются k + 1 нормальных
+        чисел η_0i (x0 = 0, σ = 1) и
+
+            t = η_0,k+1 / sqrt( (1/k) · Σ_{i=1..k} η_0i² ),   x = x0 + s·t.
+
+        В справочнике под суммой напечатано η_0i без квадрата — это опечатка:
+        сумма нормальных чисел бывает отрицательной, а Σ η² — это χ²_k,
+        и только с ней отношение распределено по Стьюденту.
+        Для дробного ν (возможно лишь у величин из старых файлов) вместо
+        суммы квадратов берётся χ²_ν напрямую — это та же формула.
+        """
         rng = np.random.default_rng(rng)
-        z = rng.standard_normal(size)
-        chi2 = rng.chisquare(self.nu, size)
-        return _scalar_or_array(self.x0 + self.s * z / np.sqrt(chi2 / self.nu))
+        shape = () if size is None else tuple(np.atleast_1d(size))
+        k = self.nu
+        if float(k).is_integer():
+            k = int(k)
+            eta = rng.standard_normal(shape + (k + 1,))
+            chi2 = (eta[..., :k] ** 2).sum(axis=-1)
+            z = eta[..., k]
+        else:
+            z = rng.standard_normal(shape)
+            chi2 = rng.chisquare(k, shape)
+        return _scalar_or_array(self.x0 + self.s * z / np.sqrt(chi2 / k))
 
     # ------------------------------------------------------------- арифметика
     def __add__(self, other):

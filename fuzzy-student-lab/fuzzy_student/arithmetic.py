@@ -28,8 +28,9 @@ OPERATION_NAMES = {"+": "сложение", "-": "вычитание", "*": "у�
 
 #: уровни α, на которых считается точный результат
 DEFAULT_ALPHAS = np.linspace(SUPPORT_ALPHA, 1.0, 60)
-#: сетка ν, по которой подбирается аппроксимация
-_NU_GRID = np.geomspace(0.2, 300.0, 500)
+#: сетка ν, по которой подбирается аппроксимация: целые числа степеней свободы
+#: k = 1..300, как в [3] (табл. 2.2.5) — результат остаётся в том же семействе
+_NU_GRID = np.arange(1.0, 301.0)
 
 
 @dataclass
@@ -49,6 +50,21 @@ class CutResult:
     @property
     def core(self) -> float:
         return float((self.left[-1] + self.right[-1]) / 2)
+
+    def membership(self, x: float) -> float | None:
+        """μ(x) результата: уровень α, на котором x лежит на границе α-среза.
+
+        Срезы вложены (левая граница растёт с α, правая убывает), поэтому μ(x)
+        находится линейной интерполяцией. None — x вне нижнего среза (μ < α_min).
+        """
+        x = float(x)
+        if x < self.left[0] or x > self.right[0]:
+            return None
+        if x < self.left[-1]:
+            return float(np.interp(x, self.left, self.alphas))
+        if x > self.right[-1]:
+            return float(np.interp(x, self.right[::-1], self.alphas[::-1]))
+        return 1.0
 
 
 @dataclass
@@ -99,8 +115,8 @@ def exact_operation(a, b, op: str, alphas=DEFAULT_ALPHAS) -> CutResult:
 def fit_student(cuts: CutResult, name: str = "") -> tuple[StudentFuzzy, float]:
     """Подбор T(x0; s; ν), наиболее близкой к результату по α-срезам.
 
-    x0 — середина ядра (α = 1); для каждого ν из сетки s находится МНК
-    по полуширинам h(α) ≈ s·g_ν(α); выбирается ν с наименьшей ошибкой.
+    x0 — середина ядра (α = 1); для каждого целого ν = 1..300 масштаб s находится
+    МНК по полуширинам h(α) ≈ s·g_ν(α); выбирается ν с наименьшей ошибкой.
     """
     mask = cuts.alphas < 1.0
     a = cuts.alphas[mask]
