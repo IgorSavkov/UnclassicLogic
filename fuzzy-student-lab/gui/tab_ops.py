@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QButtonGroup, QComboBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
                              QLabel, QPushButton, QRadioButton, QVBoxLayout, QWidget)
 
@@ -9,7 +10,11 @@ from fuzzy_student import (OPERATION_NAMES, compare, necessity_ge, operate_detai
                            possibility_ge)
 
 from . import theme
-from .common import COLOR_A, COLOR_B, COLOR_RESULT, PlotWidget, dspin, show_error
+from .common import COLOR_A, COLOR_B, COLOR_RESULT, CurveReadout, PlotWidget, card, dspin, show_error, side_column
+
+def short(v) -> str:
+    return f"T({v.x0:.2f}; {v.s:.2f}; {v.nu:g})"
+
 
 SYMBOLS = {"+": "+", "-": "−", "*": "×", "/": "÷"}
 
@@ -20,6 +25,7 @@ class OpsTab(QWidget):
         self.state = state
         self.result = None
         self._last_action = None  # для перерисовки графика при смене темы
+        self._hover = None        # (A, B, результат операции или None) — для подсказки у курсора
         self._build()
         state.set_changed.connect(self.refresh)
 
@@ -64,6 +70,7 @@ class OpsTab(QWidget):
         self.lbl_result = QLabel("Выберите операнды и действие.")
         self.lbl_result.setWordWrap(True)
         self.lbl_result.setMinimumHeight(160)
+        self.lbl_result.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         v.addWidget(self.lbl_result)
         self.btn_add = QPushButton("Добавить результат в множество")
         self.btn_add.setEnabled(False)
@@ -72,16 +79,15 @@ class OpsTab(QWidget):
         left.addWidget(box_res)
         left.addStretch()
 
-        left_w = QWidget()
-        left_w.setLayout(left)
-        left_w.setFixedWidth(340)
-        root.addWidget(left_w)
+        root.addWidget(side_column(left))
         self.plot = PlotWidget()
         self.ax = self.plot.figure.add_subplot()
-        root.addWidget(self.plot, 1)
+        root.addWidget(card("Графики", self.plot, stretch=0), 1)
+        CurveReadout(self.plot, self._hover_rows)
         self._draw_placeholder()
 
     def _draw_placeholder(self):
+        self._hover = None
         self.ax.clear()
         self.ax.set_axis_off()
         self.ax.text(0.5, 0.5, "Выберите A и B и нажмите кнопку действия —\n"
@@ -132,6 +138,7 @@ class OpsTab(QWidget):
                 self.state.journal.error(f"Операция {OPERATION_NAMES[op]}: {e}")
             return
         self._last_action = lambda: self.run_operation(op, log=False)
+        self._hover = (a, b, res)
         self.result = res.value
         r = res.value
         how = ("точно (L-R арифметика, форма сохраняется)" if res.exact
@@ -171,6 +178,7 @@ class OpsTab(QWidget):
                 show_error(self, "Сравнение", e)
             return
         self._last_action = lambda: self.run_compare(log=False)
+        self._hover = (a, b, None)
         c = compare(a, b)
         sign = {-1: "<", 0: "=", 1: ">"}[c]
         p_ab, p_ba, p_eq, n_ab = possibility_ge(a, b), possibility_ge(b, a), possibility_eq(a, b), necessity_ge(a, b)
@@ -197,6 +205,24 @@ class OpsTab(QWidget):
         ax.axhline(p_eq, color=theme.color("fg"), ls="--", lw=1, label=f"Poss(A = B) = {p_eq:.3f}")
         ax.set_title(f"Сравнение: A {sign} B")
         self._finish_axes()
+
+    def _hover_rows(self, event):
+        """μ(x) операндов и результата в точке под курсором."""
+        if self._hover is None:
+            return None
+        a, b, res = self._hover
+        x = event.xdata
+        rows = [(f"A = {a.name} {short(a)}", COLOR_A, a.membership(x))]
+        if isinstance(b, float):
+            x_lo, x_hi = self.ax.get_xlim()
+            hit = abs(x - b) <= 0.005 * (x_hi - x_lo)  # чёткое число: μ = 1 только в точке c
+            rows.append((f"B = {b:g} (чёткое число)", COLOR_B, 1.0 if hit else 0.0))
+        else:
+            rows.append((f"B = {b.name} {short(b)}", COLOR_B, b.membership(x)))
+        if res is not None:
+            rows.append(("результат по α-срезам (точно)", COLOR_RESULT, res.cuts.membership(x)))
+            rows.append((f"результат-Стьюдент {short(res.value)}", theme.color("fg"), res.value.membership(x)))
+        return self.ax, rows
 
     def _draw_value(self, v, color, label, ls="-", lw=2.0, span=None):
         lo, hi = v.alpha_cut(0.02)

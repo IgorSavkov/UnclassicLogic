@@ -3,18 +3,21 @@ from __future__ import annotations
 
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QCursor
 from PyQt6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox, QHBoxLayout, QHeaderView, QLabel,
                              QRadioButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
-                             QVBoxLayout, QWidget)
+                             QToolTip, QVBoxLayout, QWidget)
 from scipy.cluster.hierarchy import dendrogram
 
 from fuzzy_student import METHODS, ClusterAnalysis
 
 from . import theme
-from .common import NumItem, PlotWidget, cluster_colors, dspin, show_error
+from .common import NumItem, PlotWidget, card, cluster_colors, dspin, show_error
 
-SUMMARY_COLUMNS = ["Кластер", "Размер", "Средний центр x0", "Центры от", "Центры до", "Средний s", "Среднее ν"]
+SUMMARY_COLUMNS = ["Кластер", "Размер", "Средний центр x0", "Центры от", "Центры до", "Средний s", "Среднее ν",
+                   "Состав"]
+HOVER_RADIUS_PX = 7       # насколько близко к точке должен быть курсор
+HOVER_MAX_ITEMS = 12      # сколько величин перечислять в подсказке
 
 
 class ClusterTab(QWidget):
@@ -23,6 +26,9 @@ class ClusterTab(QWidget):
         self.state = state
         self.analysis: ClusterAnalysis | None = None
         self.labels = None
+        self._scatters = []      # по одной коллекции точек на кластер
+        self._centers = None     # центры кластеров на плоскости (x0, s)
+        self._tip = ""
         self._quiet = False  # перерисовка без записи в журнал (смена темы)
         self._log_timer = QTimer(self, singleShot=True, interval=700)
         self._log_timer.timeout.connect(self._log_result)
@@ -55,29 +61,39 @@ class ClusterTab(QWidget):
         bar.addWidget(QLabel("Связь кластеров:"))
         bar.addWidget(self.combo_method)
         bar.addStretch()
-        root.addLayout(bar)
+        bar_w = QWidget()
+        bar_w.setLayout(bar)
+        bar.setContentsMargins(0, 0, 0, 0)
 
         self.lbl_info = QLabel()
         self.lbl_info.setObjectName("big")
-        root.addWidget(self.lbl_info)
+        root.addWidget(card("Параметры кластеризации", bar_w, self.lbl_info))
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         self.plot = PlotWidget()
         self._create_axes()
-        splitter.addWidget(self.plot)
+        splitter.addWidget(card("Дендрограмма и величины по кластерам", self.plot, stretch=0))
         self.table = QTableWidget(0, len(SUMMARY_COLUMNS))
         self.table.setHorizontalHeaderLabels(SUMMARY_COLUMNS)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(len(SUMMARY_COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        splitter.addWidget(self.table)
-        splitter.setSizes([560, 170])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.itemSelectionChanged.connect(self._highlight_selected)
+        self.table.setToolTip("Щёлкните строку, чтобы выделить кластер на графике")
+        splitter.addWidget(card("Состав кластеров", self.table, stretch=0))
+        splitter.setSizes([520, 240])
         root.addWidget(splitter, 1)
 
         self.spin_k.valueChanged.connect(self.redraw)
         self.spin_h.valueChanged.connect(self.redraw)
         self.radio_k.toggled.connect(self._on_mode)
         self.combo_method.currentIndexChanged.connect(self.recompute)
+        self.plot.canvas.mpl_connect("motion_notify_event", self._on_hover)
+        self.plot.canvas.mpl_connect("axes_leave_event", lambda _e: self._hide_tip())
 
     def _create_axes(self):
         grid = self.plot.figure.add_gridspec(1, 2, width_ratios=[1.15, 1])
@@ -168,13 +184,18 @@ class ClusterTab(QWidget):
         self.ax_tree.set_xlabel(f"{ca.n} величин (листья дерева)")
 
         p = np.array([[v.x0, v.s] for v in ca.items])
+        self._points, self._colors = p, colors
+        self._scatters, centers = [], []
         for c, idx in enumerate(ca.groups(labels)):
             q = p[idx]
-            self.ax_points.scatter(q[:, 0], q[:, 1], s=26, color=colors[c], edgecolors="white", linewidths=0.4,
-                                   label=f"кластер {c + 1} ({len(idx)})")
-            self.ax_points.annotate(str(c + 1), q.mean(axis=0), fontsize=10, fontweight="bold", ha="center",
+            self._scatters.append(self.ax_points.scatter(
+                q[:, 0], q[:, 1], s=26, color=colors[c], edgecolors="white", linewidths=0.4,
+                label=f"кластер {c + 1} ({len(idx)})"))
+            centers.append(q.mean(axis=0))
+            self.ax_points.annotate(str(c + 1), centers[-1], fontsize=10, fontweight="bold", ha="center",
                                     va="center", color="white",
                                     bbox=dict(boxstyle="circle,pad=0.2", fc=colors[c], ec=fg, lw=0.6))
+        self._centers = np.array(centers)
         self.ax_points.set_title("Величины по кластерам (центр x0, масштаб s)")
         self.ax_points.set_xlabel("центр x0")
         self.ax_points.set_ylabel("масштаб s")
@@ -191,6 +212,7 @@ class ClusterTab(QWidget):
             self._log_timer.start()
 
     def _fill_table(self, rows, colors):
+        self.table.clearSelection()
         self.table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             item = QTableWidgetItem(f"  {row['cluster'] + 1}")
@@ -200,6 +222,56 @@ class ClusterTab(QWidget):
             for col, key, digits in ((1, "size", 0), (2, "x0_mean", 3), (3, "x0_min", 3), (4, "x0_max", 3),
                                      (5, "s_mean", 3), (6, "nu_mean", 2)):
                 self.table.setItem(r, col, NumItem(row[key], digits))
+            names = [self.analysis.items[i].name for i in self.analysis.groups(self.labels)[r]]
+            members = QTableWidgetItem(", ".join(names))
+            members.setToolTip("<br>".join(", ".join(names[i:i + 8]) for i in range(0, len(names), 8)))
+            self.table.setItem(r, 7, members)
+
+    # ------------------------------------------------- выделение кластера
+    def _highlight_selected(self):
+        rows = {i.row() for i in self.table.selectedIndexes()}
+        selected = rows.pop() if rows else None
+        for c, sc in enumerate(self._scatters):
+            sc.set_alpha(1.0 if selected is None or c == selected else 0.12)
+            sc.set_zorder(3 if c == selected else 2)
+        self.plot.draw()
+
+    # ------------------------------------------------ подсказка у курсора
+    def _hide_tip(self):
+        if self._tip:
+            self._tip = ""
+            QToolTip.hideText()
+
+    def _on_hover(self, event):
+        """Какие величины (и центр какого кластера) под курсором."""
+        if (event.inaxes is not self.ax_points or self.labels is None or self._centers is None
+                or event.x is None):
+            self._hide_tip()
+            return
+        to_px = self.ax_points.transData.transform
+        cursor = np.array([event.x, event.y])
+        lines = []
+        d_center = np.hypot(*(to_px(self._centers) - cursor).T)
+        for c in np.flatnonzero(d_center < 2 * HOVER_RADIUS_PX):
+            idx = self.analysis.groups(self.labels)[c]
+            x0m, sm = self._centers[c]
+            lines.append(f'<span style="color:{self._colors[c]}">●</span> <b>центр кластера {c + 1}</b>: '
+                         f'{len(idx)} величин, x̄<sub>0</sub> = {x0m:.3f}, s̄ = {sm:.3f}')
+        d = np.hypot(*(to_px(self._points) - cursor).T)
+        hits = np.argsort(d)[:np.count_nonzero(d < HOVER_RADIUS_PX)]
+        for i in hits[:HOVER_MAX_ITEMS]:
+            v, c = self.analysis.items[i], int(self.labels[i])
+            lines.append(f'<span style="color:{self._colors[c]}">■</span> <b>{v.name}</b> '
+                         f'T({v.x0:.3f}; {v.s:.3f}; {v.nu:g}) — кластер {c + 1}')
+        if len(hits) > HOVER_MAX_ITEMS:
+            lines.append(f"… и ещё {len(hits) - HOVER_MAX_ITEMS}")
+        if not lines:
+            self._hide_tip()
+            return
+        text = "<br>".join(lines)
+        if text != self._tip:
+            self._tip = text
+            QToolTip.showText(QCursor.pos(), text, self.plot.canvas)
 
     def _log_result(self):
         if self.analysis is None or self.labels is None:
