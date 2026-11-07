@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 
 from PyQt6.QtCore import QLocale, QSettings
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
 from PyQt6.QtWidgets import QApplication, QLabel, QMainWindow, QMessageBox, QTabWidget
 
 from fuzzy_student import Journal, __version__, generate_set
@@ -78,19 +78,32 @@ class MainWindow(QMainWindow):
         m.addAction(act_exit)
 
         v = self.menuBar().addMenu("Вид")
-        self.act_dark = QAction("Тёмная тема", self)
-        self.act_dark.setCheckable(True)
-        self.act_dark.setChecked(theme.name() == "dark")
-        self.act_dark.setShortcut("Ctrl+T")
-        self.act_dark.toggled.connect(lambda on: self.set_theme("dark" if on else "light"))
-        v.addAction(self.act_dark)
+        group = QActionGroup(self)
+        self.theme_actions = {}
+        for key, title in theme.NAMES.items():
+            act = QAction(f"Тема: {title}", self, checkable=True)
+            act.setChecked(theme.name() == key)
+            act.triggered.connect(lambda _=False, k=key: self.set_theme(k))
+            group.addAction(act)
+            v.addAction(act)
+            self.theme_actions[key] = act
+        v.addSeparator()
+        act_next = QAction("Следующая тема", self)
+        act_next.setShortcut("Ctrl+T")
+        act_next.triggered.connect(self._next_theme)
+        v.addAction(act_next)
 
         h = self.menuBar().addMenu("Справка")
         act_about = QAction("О программе", self)
         act_about.triggered.connect(lambda: QMessageBox.about(self, "О программе", ABOUT))
         h.addAction(act_about)
 
+    def _next_theme(self):
+        keys = list(theme.NAMES)
+        self.set_theme(keys[(keys.index(theme.name()) + 1) % len(keys)])
+
     def set_theme(self, name: str):
+        self.theme_actions[name].setChecked(True)
         theme.apply(QApplication.instance(), name)
         for tab in (self.tab_set, self.tab_alpha, self.tab_ops, self.tab_cluster):
             tab.on_theme_changed()
@@ -115,7 +128,7 @@ def run() -> int:
     QLocale.setDefault(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))  # точка в дробях
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
-    theme.apply(app, str(settings().value("theme", "light")))
+    theme.apply(app, str(settings().value("theme", theme.DEFAULT)))
     window = MainWindow()
     window.show()
     return app.exec()

@@ -9,7 +9,7 @@ call .venv\Scripts\activate.bat
 python -m pip install --disable-pip-version-check -r requirements.txt pyinstaller
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name FuzzyStudent ^
     --exclude-module tkinter --exclude-module PyQt5 --exclude-module PySide6 ^
-    --add-data "gui\check.svg;gui" ^
+    --add-data "gui\*.svg;gui" ^
     main.py
 echo.
 echo Готово: dist\FuzzyStudent.exe
