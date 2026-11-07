@@ -43,11 +43,24 @@ class StudentFuzzyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             StudentFuzzy(0, 1, -1)
         with self.assertRaises(ValueError):
+            StudentFuzzy(0, 1, 0.5)  # по справочнику k >= 1
+        with self.assertRaises(ValueError):
             StudentFuzzy(0, 1, 5).alpha_cut(0)
 
     def test_sampling_center(self):
         a = StudentFuzzy(5, 1, 10)
         self.assertAlmostEqual(float(np.median(a.sample(20000, rng=1))), 5, delta=0.05)
+
+    def test_sampling_follows_student_law(self):
+        """Способ из справочника даёт распределение Стьюдента (критерий Колмогорова)."""
+        from scipy import stats
+        for nu in (1, 3, 10):
+            a = StudentFuzzy(2, 0.5, nu)
+            x = a.sample(5000, rng=7)
+            self.assertEqual(x.shape, (5000,))
+            p = stats.kstest(x, "t", args=(nu, 2, 0.5)).pvalue
+            self.assertGreater(p, 0.01, f"ν = {nu}")
+        self.assertIsInstance(StudentFuzzy(0, 1, 4).sample(rng=1), float)
 
     def test_dict_roundtrip(self):
         a = StudentFuzzy(1.5, 0.3, 7, "A")
@@ -81,6 +94,23 @@ class ArithmeticTest(unittest.TestCase):
         self.assertAlmostEqual(fitted.s, 2, delta=0.02)
         self.assertAlmostEqual(fitted.nu, 7, delta=0.3)
         self.assertLess(err, 1e-2)
+
+    def test_approximation_keeps_integer_nu(self):
+        """Результат × и ÷ остаётся в семействе справочника: ν — целое, ν >= 1."""
+        a, b = StudentFuzzy(2, 0.5, 5), StudentFuzzy(3, 0.3, 5)
+        for op in "*/":
+            nu = operate_detailed(a, b, op).value.nu
+            self.assertGreaterEqual(nu, 1)
+            self.assertTrue(float(nu).is_integer(), f"{op}: ν = {nu}")
+
+    def test_cut_result_membership(self):
+        """μ точного результата по α-срезам совпадает с μ, когда результат — величина Стьюдента."""
+        a, b = StudentFuzzy(1, 1, 5), StudentFuzzy(2, 0.5, 5)
+        r = operate_detailed(a, b, "+")
+        for x in (2.0, 3.0, 3.7, 4.4):
+            self.assertAlmostEqual(r.cuts.membership(x), r.value.membership(x), delta=2e-3)
+        self.assertEqual(r.cuts.membership(3.0), 1.0)
+        self.assertIsNone(r.cuts.membership(100.0))       # вне носителя
 
     def test_multiplication_core(self):
         r = StudentFuzzy(3, 0.2, 10) * StudentFuzzy(4, 0.1, 10)
@@ -146,6 +176,38 @@ class FuzzySetTest(unittest.TestCase):
     def test_alpha_subset_by_point(self):
         fs = FuzzySet([StudentFuzzy(0, 1, 5), StudentFuzzy(10, 1, 5)])
         self.assertEqual(fs.alpha_subset(0.5, point=0.2), [0])
+
+    def test_filter_by_params(self):
+        fs = FuzzySet([StudentFuzzy(0, 1, 5), StudentFuzzy(2, 0.5, 20), StudentFuzzy(5, 2, 3)])
+        self.assertEqual(fs.filter_by_params(), [0, 1, 2])                    # без условий — все
+        self.assertEqual(fs.filter_by_params(x0=(-1, 3)), [0, 1])
+        self.assertEqual(fs.filter_by_params(x0=(-1, 3), nu=(10, None)), [1])  # условия по «И»
+        self.assertEqual(fs.filter_by_params(s=(None, 1)), [0, 1])            # открытая граница
+        self.assertEqual(fs.filter_by_params(x0=(2, 2)), [1])                 # границы включаются
+        self.assertEqual(fs.filter_by_params(nu=(100, 200)), [])
+        self.assertEqual(FuzzySet().filter_by_params(x0=(0, 1)), [])
+        with self.assertRaises(ValueError):
+            fs.filter_by_params(s=(2, 1))
+
+    def test_alpha_subset_by_window(self):
+        a, b = StudentFuzzy(0, 1, 5), StudentFuzzy(10, 1, 5)
+        fs = FuzzySet([a, b])
+        # центр внутри окна — степень 1; вне окна — μ в ближайшем конце окна
+        np.testing.assert_allclose(fs.window_degrees(-1, 7), [1.0, b.membership(7)])
+        self.assertEqual(fs.alpha_subset(0.5, window=(-1, 7)), [0])
+        self.assertEqual(fs.alpha_subset(0.01, window=(-1, 7)), [0, 1])
+        # совпадает с прямой проверкой пересечения α-среза и окна
+        gen = generate_set(150, seed=5)
+        for alpha in (0.1, 0.5, 0.9):
+            direct = [i for i, v in enumerate(gen)
+                      if v.alpha_cut(alpha)[0] <= 2 and v.alpha_cut(alpha)[1] >= -1]
+            self.assertEqual(gen.alpha_subset(alpha, window=(-1, 2)), direct)
+        # окно нулевой ширины — то же, что критерий по точке
+        self.assertEqual(gen.alpha_subset(0.4, window=(3, 3)), gen.alpha_subset(0.4, point=3))
+        with self.assertRaises(ValueError):
+            fs.window_degrees(5, 1)
+        with self.assertRaises(ValueError):
+            fs.alpha_subset(0.5, point=1, window=(0, 2))
 
     def test_save_and_load(self):
         fs = generate_set(100, seed=1)

@@ -82,6 +82,28 @@ class FuzzySet:
         result._items = [self._items[i] for i in indices]
         return result
 
+    # ---------------------------------------------------- отбор по параметрам
+    def filter_by_params(self, x0=None, s=None, nu=None) -> list[int]:
+        """Индексы величин, у которых каждый заданный параметр лежит в [от; до].
+
+        Каждый аргумент — None (без условия) или пара (от, до), где любая граница
+        тоже может быть None (не ограничена). Условия объединяются по «И».
+            fs.filter_by_params(x0=(-2, 3), nu=(10, None))  # x0 ∈ [-2; 3] и ν ≥ 10
+        """
+        p = self.params()
+        mask = np.ones(len(p), dtype=bool)
+        for col, (title, bounds) in enumerate((("x0", x0), ("s", s), ("ν", nu))):
+            if bounds is None:
+                continue
+            lo, hi = bounds
+            if lo is not None and hi is not None and lo > hi:
+                raise ValueError(f"{title}: нижняя граница {lo} больше верхней {hi}")
+            if lo is not None:
+                mask &= p[:, col] >= lo - 1e-12
+            if hi is not None:
+                mask &= p[:, col] <= hi + 1e-12
+        return [int(i) for i in np.flatnonzero(mask)]
+
     # --------------------------------------------------------- отбор по α
     def heights_with(self, reference: StudentFuzzy) -> np.ndarray:
         """Poss(reference = B) для каждой величины B множества."""
@@ -92,25 +114,45 @@ class FuzzySet:
 
     def memberships_at(self, x: float) -> np.ndarray:
         """μ_B(x) для каждой величины B множества."""
+        return self.window_degrees(x, x)
+
+    def window_degrees(self, a: float, b: float) -> np.ndarray:
+        """sup_{x ∈ [a; b]} μ_B(x) для каждой величины B — степень, с которой B «попадает в окно».
+
+        μ_B симметрична и убывает от центра, поэтому максимум на отрезке
+        достигается в ближайшей к x0 точке окна: x = clip(x0, a, b).
+        B_α ∩ [a; b] ≠ ∅  ⇔  эта степень >= α.  При a = b это просто μ_B(a).
+        """
+        if a > b:
+            raise ValueError("левая граница окна a должна быть не больше правой b")
         if not self._items:
             return np.empty(0)
         p = self.params()
-        t = (x - p[:, 0]) / p[:, 1]
+        t = (np.clip(p[:, 0], a, b) - p[:, 0]) / p[:, 1]
         return (1.0 + t * t / p[:, 2]) ** (-(p[:, 2] + 1.0) / 2.0)
 
     def alpha_subset(self, alpha: float, reference: StudentFuzzy | None = None,
-                     point: float | None = None) -> list[int]:
+                     point: float | None = None, window: tuple[float, float] | None = None) -> list[int]:
         """Индексы величин, отобранных α-срезом.
 
-        reference — величины, чей α-срез пересекается с α-срезом reference
-                    (то есть Poss(reference = B) >= α);
-        point     — величины, чьему α-срезу принадлежит точка x* (μ_B(x*) >= α).
+        Носитель величины Стьюдента — вся ось, и любая нормированная кривая пересекает
+        любой уровень α, поэтому «проходит под α» определяется одним из критериев:
+
+        reference — α-срез B пересекается с α-срезом reference (Poss(reference = B) >= α);
+        point     — точка x* лежит в α-срезе B (μ_B(x*) >= α);
+        window    — α-срез B пересекает окно [a; b] (sup_{[a; b]} μ_B >= α).
         """
         if not 0 < alpha <= 1:
             raise ValueError("α должно лежать в интервале (0; 1]")
-        if (reference is None) == (point is None):
-            raise ValueError("нужно задать ровно один критерий: reference или point")
-        scores = self.heights_with(reference) if reference is not None else self.memberships_at(point)
+        given = [c is not None for c in (reference, point, window)]
+        if sum(given) != 1:
+            raise ValueError("нужно задать ровно один критерий: reference, point или window")
+        if reference is not None:
+            scores = self.heights_with(reference)
+        elif point is not None:
+            scores = self.memberships_at(point)
+        else:
+            scores = self.window_degrees(*window)
         return [int(i) for i in np.flatnonzero(scores >= alpha - 1e-12)]
 
     # ------------------------------------------------------------- файлы
