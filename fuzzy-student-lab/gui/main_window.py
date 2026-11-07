@@ -130,5 +130,10 @@ def run() -> int:
     app.setApplicationName(APP_TITLE)
     theme.apply(app, str(settings().value("theme", theme.DEFAULT)))
     window = MainWindow()
-    window.show()
+    # на небольшом экране (ноутбук, масштаб 125–175 %) окно сразу разворачивается
+    avail = window.screen().availableGeometry()
+    if avail.width() < window.width() or avail.height() < window.height():
+        window.showMaximized()
+    else:
+        window.show()
     return app.exec()

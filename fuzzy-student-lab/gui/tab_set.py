@@ -145,17 +145,22 @@ class SetTab(QWidget):
         g.setColumnStretch(4, 1)
         self.lbl_filter = QLabel()
         self.lbl_filter.setObjectName("big")
-        self.btn_filter = QPushButton("Сделать подмножество рабочим множеством")
+        self.lbl_filter.setWordWrap(True)
+        # Счётчик и кнопки — под условиями, а не справа: так блок помещается на узком экране.
+        self.btn_filter = QPushButton("Сделать рабочим множеством")
         self.btn_filter.setObjectName("primary")
+        self.btn_filter.setToolTip("Сделать подмножество, удовлетворяющее условиям, рабочим множеством")
         self.btn_filter.clicked.connect(self._make_filter_subset)
-        self.btn_filter_restore = QPushButton("Вернуть исходное множество")
+        self.btn_filter_restore = QPushButton("Вернуть исходное")
+        self.btn_filter_restore.setToolTip("Вернуть исходное множество")
         self.btn_filter_restore.clicked.connect(self.state.restore_full_set)
         btn_reset = QPushButton("Сбросить условия")
         btn_reset.clicked.connect(self._reset_filter)
-        g.addWidget(self.lbl_filter, 0, 5, 1, 2)
-        g.addWidget(self.btn_filter, 1, 5, 1, 2)
-        g.addWidget(self.btn_filter_restore, 2, 5)
-        g.addWidget(btn_reset, 2, 6)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.lbl_filter, 1)
+        for b in (self.btn_filter, self.btn_filter_restore, btn_reset):
+            buttons.addWidget(b)
+        g.addLayout(buttons, len(FILTER_PARAMS), 0, 1, 5)
         return box
 
     def _filter_conditions(self) -> dict:

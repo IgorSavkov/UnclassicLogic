@@ -13,9 +13,9 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure  # noqa: E402
 import numpy as np  # noqa: E402
 from PyQt6.QtCore import Qt  # noqa: E402
-from PyQt6.QtGui import QCursor  # noqa: E402
-from PyQt6.QtWidgets import (QDoubleSpinBox, QFormLayout, QGroupBox, QLayout, QMessageBox, QTableWidgetItem,  # noqa: E402
-                             QToolTip, QVBoxLayout, QWidget)
+from PyQt6.QtGui import QColor, QCursor, QPalette  # noqa: E402
+from PyQt6.QtWidgets import (QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QLayout, QMessageBox,  # noqa: E402
+                             QScrollArea, QTableWidgetItem, QToolTip, QVBoxLayout, QWidget)
 
 SIDE_WIDTH = 360  # ширина левой колонки с настройками — одна на всех вкладках
 
@@ -60,6 +60,7 @@ class PlotWidget(QWidget):
         super().__init__(parent)
         self.figure = Figure(layout="constrained")
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self._sync_background()
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self.toolbar = NavigationToolbar2QT(self.canvas, self) if toolbar else None
@@ -70,6 +71,14 @@ class PlotWidget(QWidget):
         self._bg = [None, None]          # фон без слоёв; фон со слоем 0
         self._full_pending = True        # полная перерисовка уже запрошена
         self.canvas.mpl_connect("draw_event", self._on_draw)
+
+    def _sync_background(self):
+        """Фон холста — в цвет рисунка. При дробном масштабе Windows (125–175 %) картинка
+        matplotlib на долю пикселя меньше виджета, а остаток matplotlib стирает фоном виджета,
+        который сам же задаёт белым, — по краю графика была видна белая линия."""
+        pal = self.canvas.palette()
+        pal.setColor(QPalette.ColorRole.Window, QColor(mcolors.to_hex(self.figure.get_facecolor())))
+        self.canvas.setPalette(pal)
 
     def draw(self):
         """Полная перерисовка (когда меняется фон: данные, оси, режим)."""
@@ -135,6 +144,7 @@ class PlotWidget(QWidget):
         self._bg = [None, None]
         self.figure.clear()
         self.figure.set_facecolor(matplotlib.rcParams["figure.facecolor"])
+        self._sync_background()
         if self.toolbar:  # иконки панели подбираются под светлый/тёмный фон при создании
             self._layout.removeWidget(self.toolbar)
             self.toolbar.deleteLater()
@@ -156,6 +166,7 @@ class CurveReadout:
     def __init__(self, plot: PlotWidget, provider):
         self.plot = plot
         self.provider = provider
+        self.paused = False  # True — подсказка не показывается (например, пока тянут линию α)
         self._ax = None
         self._tip = ""
         canvas = plot.canvas
@@ -184,6 +195,9 @@ class CurveReadout:
             self.plot.update_overlay()
 
     def _on_move(self, event):
+        if self.paused:
+            self.hide()
+            return
         result = self.provider(event) if event.inaxes is not None else None
         if not result or event.inaxes is not result[0] or event.xdata is None:
             self.hide()
@@ -238,14 +252,26 @@ class _SideColumn(QWidget):
         super().showEvent(event)
 
 
-def side_column(layout: QLayout) -> QWidget:
+def side_column(layout: QLayout) -> QScrollArea:
     """Левая колонка вкладки. Без собственных отступов, чтобы карточки слева и справа
-    начинались и заканчивались на одной линии."""
+    начинались и заканчивались на одной линии.
+
+    Колонка лежит в области прокрутки: если по высоте она не помещается (ноутбук, крупный
+    масштаб Windows), появляется полоса прокрутки. Без этого Qt сжимает поля меньше их
+    минимального размера, и подписи налезают друг на друга."""
     layout.setContentsMargins(0, 0, 0, 0)
-    w = _SideColumn()
-    w.setLayout(layout)
-    w.setFixedWidth(SIDE_WIDTH)
-    return w
+    inner = _SideColumn()
+    inner.setLayout(layout)
+    area = QScrollArea()
+    area.setWidget(inner)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setFixedWidth(SIDE_WIDTH)
+    # прозрачный фон: колонка выглядит так же, как без прокрутки
+    area.viewport().setAutoFillBackground(False)
+    inner.setAutoFillBackground(False)
+    return area
 
 
 def card(title: str, *widgets: QWidget, stretch: int | None = None) -> QGroupBox:
