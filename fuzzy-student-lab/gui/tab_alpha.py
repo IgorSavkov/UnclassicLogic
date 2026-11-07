@@ -1,4 +1,12 @@
-"""Вкладка «α-срез»: все величины на одном графике, уровень α и отбор подмножества."""
+"""Вкладка «α-срез»: все величины на одном графике, уровень α и отбор подмножества.
+
+Управление одинаково на графике и в таблице:
+  щелчок по кривой или строке          — сделать величину выбранной (красной);
+  галочка ✓ в таблице, Ctrl+щелчок     — включить / исключить величину из подмножества;
+  правый щелчок по кривой или строке   — меню: выбрать, включить/исключить, закрепить подсветку;
+  наведение на строку таблицы          — временно подсветить её кривую на графике;
+  перетаскивание мышью                 — линия α, линия x*, края окна [a; b].
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -6,11 +14,11 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import to_rgba
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
-                             QHeaderView, QLabel, QMessageBox, QPushButton, QSlider, QSplitter, QTableWidget,
-                             QTableWidgetItem, QVBoxLayout, QWidget)
+from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtGui import QBrush, QColor, QCursor, QIcon, QPainter, QPixmap
+from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QCompleter, QFormLayout, QGroupBox,
+                             QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QPushButton, QSlider,
+                             QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from fuzzy_student import SUPPORT_ALPHA, spread_factor
 
@@ -51,7 +59,17 @@ def swatch(color: str | None) -> QIcon:
     return _swatches[color]
 
 
-CUT_COLUMNS = ["Имя", "Центр x0", "Масштаб s", "ν", "Степень*", "α-срез: левая", "α-срез: правая", "Ширина α-среза"]
+CUT_COLUMNS = ["✓", "Имя", "Центр x0", "Масштаб s", "ν", "Степень*", "α-срез: левая", "α-срез: правая",
+               "Ширина α-среза"]
+CHECK_COL = 0   # столбец галочек «войдёт в подмножество» (отдельный: щелчок по нему не выбирает величину)
+NAME_COL = 1
+SORT_COL = 5    # «Степень»: по умолчанию подходящие сверху
+GRAB_PX = 6     # насколько близко к линии α / x* / краю окна надо нажать, чтобы её потянуть
+HELP_TEXT = ("Щелчок по строке или по кривой на графике — сделать величину выбранной (красной).\n"
+             "Галочка ✓ — величина войдёт в подмножество (на графике — Ctrl+щелчок по кривой).\n"
+             "Правый щелчок по строке или кривой — меню: выбрать, включить/исключить, закрепить подсветку.\n"
+             "Наведите курсор на строку — её кривая подсветится на графике.\n"
+             "* Степень — значение критерия отбора: величина подходит, если степень ≥ α.")
 
 
 class AlphaTab(QWidget):
@@ -62,8 +80,11 @@ class AlphaTab(QWidget):
         self.segments = None
         self.mask = np.empty(0, dtype=bool)
         self._unchecked: set[int] = set()  # подходящие величины, с которых сняли галочку
-        # величины, выделенные в таблице → цвет подсветки (цвет держится, пока строка выделена)
+        # закреплённая подсветка (из меню по правому щелчку): индекс величины → цвет
         self._highlight: dict[int, str] = {}
+        self._hover: int | None = None    # строка таблицы под курсором — её кривая подсвечена
+        self._drag: str | None = None     # что тянут мышью: "alpha" | "x" | "a" | "b"
+        self._cursor = None               # текущая форма курсора над графиком
         self._legend_key = None
         self._full = True  # нужна полная перерисовка графика (изменился фон), иначе — только слой
         self._table_timer = QTimer(self, singleShot=True, interval=120)  # таблица при движении α
@@ -82,6 +103,17 @@ class AlphaTab(QWidget):
         box_v = QGroupBox("Выбранная величина")
         fv = QFormLayout(box_v)
         self.combo = QComboBox()
+        # поиск: в списке 100–300 величин, листать долго — можно начать вводить имя (T05…)
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.combo.setToolTip("Начните вводить имя (например, T05) — список отфильтруется")
+        completer = QCompleter(self.combo.model(), self)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.activated[str].connect(self._on_combo_text)
+        self.combo.setCompleter(completer)
+        self.combo.lineEdit().editingFinished.connect(lambda: self._on_combo_text(self.combo.lineEdit().text()))
         self.combo.currentIndexChanged.connect(self._on_combo)
         fv.addRow(self.combo)
         self.lbl = {}
@@ -162,32 +194,49 @@ class AlphaTab(QWidget):
 
         self.plot = PlotWidget()
         self.ax = self.plot.figure.add_subplot()
-        CurveReadout(self.plot, self._hover_rows)
-        self.plot.canvas.mpl_connect("button_press_event", self._on_plot_click)
+        self.readout = CurveReadout(self.plot, self._hover_rows)
+        canvas = self.plot.canvas
+        canvas.mpl_connect("button_press_event", self._on_plot_press)
+        canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
+        canvas.mpl_connect("button_release_event", self._on_plot_release)
+        plot_hint = QLabel("Линию α можно тянуть мышью (в режимах «точка x*» и «окно» — и их линии). "
+                           "Щелчок по кривой — выбрать величину, правый щелчок — меню.")
+        plot_hint.setWordWrap(True)
+        plot_hint.setObjectName("hint")
 
         self.table = QTableWidget(0, len(CUT_COLUMNS))
         self.table.setHorizontalHeaderLabels(CUT_COLUMNS)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(CHECK_COL, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(CHECK_COL, 34)
+        self.table.horizontalHeaderItem(CHECK_COL).setToolTip("Войдёт в подмножество")
         self.table.verticalHeader().setVisible(False)
+        # одна выбранная строка = выбранная (красная) величина
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSortIndicator(4, Qt.SortOrder.DescendingOrder)  # подходящие сверху
+        header.setSortIndicator(SORT_COL, Qt.SortOrder.DescendingOrder)  # подходящие сверху
         self.table.setSortingEnabled(True)
         self.table.itemChanged.connect(self._on_item_checked)
-        self.table.itemSelectionChanged.connect(self._on_highlight)
-        self.table.cellDoubleClicked.connect(lambda row, _c: self.state.select(self._row_index(row)))
-        hint = QLabel("Щелчок по кривой на графике или двойной щелчок по строке — сделать величину выбранной. "
-                      "Галочка — величина войдёт в подмножество (на графике — Ctrl+щелчок по кривой). "
-                      "Выделение строк (Ctrl/Shift) — подсветка на графике. Щелчок по заголовку — сортировка. "
-                      "* Степень — значение критерия отбора: величина подходит, если степень ≥ α.")
+        self.table.itemSelectionChanged.connect(self._on_row_selected)
+        self.table.setMouseTracking(True)
+        self.table.viewport().setMouseTracking(True)  # события движения без нажатой кнопки — для наведения
+        self.table.cellEntered.connect(lambda row, _col: self._set_hover(self._row_index(row)))
+        self.table.viewport().installEventFilter(self)  # щелчок по галочке; уход курсора с таблицы
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_menu)
+        self.table.setToolTip(HELP_TEXT)
+        hint = QLabel("✓ — войдёт в подмножество. Щелчок по строке — выбрать величину, правый щелчок — меню. "
+                      "* Степень ≥ α — величина подходит.")
+        hint.setToolTip(HELP_TEXT)
         hint.setWordWrap(True)
         hint.setObjectName("hint")
         self.table_box = card("α-срезы величин", self.table, hint, stretch=0)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(card("Функции принадлежности", self.plot, stretch=0))
+        splitter.addWidget(card("Функции принадлежности", self.plot, plot_hint, stretch=0))
         splitter.addWidget(self.table_box)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
@@ -229,7 +278,28 @@ class AlphaTab(QWidget):
         if index >= 0:
             self.state.select(index - 1)
 
+    def _on_combo_text(self, text: str):
+        """Поиск в списке: точное совпадение или единственная величина, имя которой содержит текст."""
+        query = text.strip().lower()
+        items = [self.combo.itemText(i) for i in range(self.combo.count())]
+        index = next((i for i, t in enumerate(items) if t.lower() == query), -1)
+        if index < 0 and query:
+            found = [i for i, t in enumerate(items) if i > 0 and query in t.lower()]
+            index = found[0] if len(found) == 1 else -1
+        if index >= 0 and index != self.combo.currentIndex():
+            self.combo.setCurrentIndex(index)  # дальше — _on_combo
+        else:  # ничего не нашлось или неоднозначно — вернуть подпись выбранной
+            self.combo.lineEdit().setText(self.combo.currentText())
+
+    def _reset_unchecked(self, reason: str):
+        """Снятые галочки относятся к прежнему набору подходящих величин — при смене выбранной
+        величины (в режиме пересечения) или критерия они сбрасываются, а не «залипают»."""
+        if self._unchecked:
+            self._unchecked.clear()
+            self.state.log(f"Снятые галочки сброшены: {reason}")
+
     def _on_mode(self, mode: int):
+        self._reset_unchecked("изменился критерий отбора")
         self.spin_x.setEnabled(mode == MODE_POINT)
         self.spin_a.setEnabled(mode == MODE_WINDOW)
         self.spin_b.setEnabled(mode == MODE_WINDOW)
@@ -247,7 +317,9 @@ class AlphaTab(QWidget):
         self._log_timer.start()
 
     def _on_param(self, _value):
-        self._refresh()
+        # x*, a, b меняют только динамический слой графика — без полной перерисовки,
+        # чтобы линию можно было плавно тянуть мышью; таблица догоняет с задержкой
+        self._refresh(full=False, defer_table=True)
         self._log_timer.start()
 
     def _window(self) -> tuple[float, float]:
@@ -264,6 +336,7 @@ class AlphaTab(QWidget):
         self.combo.blockSignals(False)
         self._unchecked.clear()
         self._highlight.clear()
+        self._hover = None
         self._build_static()
         self._refresh()
 
@@ -271,6 +344,8 @@ class AlphaTab(QWidget):
         self.combo.blockSignals(True)
         self.combo.setCurrentIndex(index + 1)
         self.combo.blockSignals(False)
+        if self.combo_mode.currentIndex() == MODE_INTERSECT:
+            self._reset_unchecked("выбрана другая величина — изменился набор подходящих")
         self._refresh()
         if index >= 0:
             self._scroll_to(index)
@@ -307,7 +382,9 @@ class AlphaTab(QWidget):
         self.lc_off = LineCollection([], colors=c_pass, linewidths=0.8, alpha=0.35, linestyles="--", zorder=1.8)
         self.lc_pass = LineCollection([], colors=c_pass, linewidths=0.8, alpha=0.8, zorder=2)
         self.lc_hl = LineCollection([], colors=theme.color("highlight"), linewidths=2.2, zorder=3.5)
-        for lc in (self.lc_fail, self.lc_off, self.lc_pass, self.lc_hl):
+        # строка таблицы под курсором — её кривая цветом текста, толще остальных
+        self.lc_hover = LineCollection([], colors=fg, linewidths=2.6, zorder=3.8)
+        for lc in (self.lc_fail, self.lc_off, self.lc_pass, self.lc_hl, self.lc_hover):
             ax.add_collection(lc)
         (self.line_sel,) = ax.plot([], [], color=COLOR_SELECTED, lw=2.6, zorder=4)
         self.line_alpha = ax.axhline(0.5, color=fg, ls="--", lw=1.2, zorder=5)
@@ -332,9 +409,10 @@ class AlphaTab(QWidget):
         ax.grid(alpha=0.3)
         self._legend_key = None
         # Фон (рисуется редко): оси и все кривые серым (lc_fail). Всё, что меняется при движении α,
-        # галочках и выделении, — динамический слой поверх фона (порядок списка = порядок рисования).
-        for artist in (self.zone, self.lc_off, self.lc_pass, self.lc_hl, self.line_sel, self.dots,
-                       self.line_alpha, self.line_cut, self.line_l, self.line_r, self.line_x, ax.title):
+        # x*, окна, галочках и подсветке, — динамический слой поверх фона (порядок списка = порядок
+        # рисования). Окно [a; b] (span) тоже в динамическом слое: его края тянут мышью.
+        for artist in (self.span, self.zone, self.lc_off, self.lc_pass, self.lc_hl, self.lc_hover, self.line_sel,
+                       self.dots, self.line_alpha, self.line_cut, self.line_l, self.line_r, self.line_x, ax.title):
             self.plot.add_animated(artist)
         self._full = True
 
@@ -351,9 +429,9 @@ class AlphaTab(QWidget):
             handles.append(Line2D([], [], color=c_pass, lw=1.2, ls="--", alpha=0.5,
                                   label="подходят, но не отмечены"))
         shown = hl[:LEGEND_MAX_HL]
-        handles += [Line2D([], [], color=c, lw=2.2, label=f"{name} (выделена)") for name, c in shown]
+        handles += [Line2D([], [], color=c, lw=2.2, label=f"{name} (подсветка)") for name, c in shown]
         if len(hl) > len(shown):
-            handles.append(Line2D([], [], ls="none", label=f"… и ещё выделено: {len(hl) - len(shown)}"))
+            handles.append(Line2D([], [], ls="none", label=f"… и ещё с подсветкой: {len(hl) - len(shown)}"))
         handles += [Line2D([], [], color=c_fail, lw=1.5, label="не подходят"),
                     Line2D([], [], color=fg, ls="--", label="уровень α")]
         if mode == MODE_WINDOW:
@@ -387,11 +465,11 @@ class AlphaTab(QWidget):
             u, passed = fs[i], bool(self.mask[i])
             color = self._highlight.get(i) or (theme.color("pass") if passed else theme.color("fail"))
             if passed:
-                state = "не отмечена" if i in self._unchecked else "отмечена"
-                note = (f"подходит под отбор, {state}<br>щелчок — сделать выбранной, Ctrl+щелчок — "
-                        f"{'отметить' if i in self._unchecked else 'снять отметку'}")
+                state = "исключена из подмножества" if i in self._unchecked else "войдёт в подмножество"
+                note = f"подходит под отбор, {state}"
             else:
-                note = "не подходит под отбор<br>щелчок — сделать выбранной"
+                note = "не подходит под отбор"
+            note += "<br>щелчок — выбрать, правый щелчок — меню"
             rows.append((f"под курсором {u.name} T({u.x0:.2f}; {u.s:.2f}; {u.nu:g})", color, mu,
                          f"{where(mu)}; {note}"))
         return (self.ax, rows) if rows else None
@@ -411,27 +489,182 @@ class AlphaTab(QWidget):
         i = int(np.argmin(dist))
         return (i, float(mu_all[i])) if dist[i] < radius_px else None
 
-    def _on_plot_click(self, event):
-        """Щелчок по кривой — сделать величину выбранной.
-        Ctrl+щелчок — поставить/снять её галочку (если величина подходит под отбор)."""
+    # ------------------------------------------------- мышь на графике
+    def _toolbar_busy(self) -> bool:
+        """Включены лупа или сдвиг панели инструментов — щелчки и перетаскивание для них."""
         toolbar = self.plot.toolbar
-        if (event.button != 1 or event.dblclick or event.inaxes is not self.ax
-                or (toolbar is not None and toolbar.mode)):  # включены лупа/сдвиг — щелчок для них
+        return toolbar is not None and bool(toolbar.mode)
+
+    def _handle_at(self, event) -> str | None:
+        """Какую линию можно потянуть в этой точке: "alpha", "x", "a", "b" или None."""
+        if event.inaxes is not self.ax or event.x is None or self.segments is None:
+            return None
+        to_px = self.ax.transData.transform
+        mode = self.combo_mode.currentIndex()
+        candidates = [("alpha", abs(event.y - to_px((0, self.alpha()))[1]))]
+        if mode == MODE_POINT:
+            candidates.append(("x", abs(event.x - to_px((self.spin_x.value(), 0))[0])))
+        elif mode == MODE_WINDOW:
+            candidates.append(("a", abs(event.x - to_px((self.spin_a.value(), 0))[0])))
+            candidates.append(("b", abs(event.x - to_px((self.spin_b.value(), 0))[0])))
+        name, dist = min(candidates, key=lambda c: c[1])
+        return name if dist <= GRAB_PX else None
+
+    def _on_plot_press(self, event):
+        """Левая кнопка: у линии α / x* / края окна — начать перетаскивание; у кривой — выбрать её
+        (Ctrl — включить/исключить из подмножества). Правая кнопка у кривой — меню."""
+        if event.inaxes is not self.ax or event.dblclick or self._toolbar_busy():
             return
-        near = self._nearest_curve(event)
-        if near is None:
-            return
-        i = near[0]
-        if event.key == "control":
-            if not self.mask[i]:
+        if event.button == 1:
+            handle = self._handle_at(event)
+            if handle is not None:
+                self._drag = handle
+                self.readout.paused = True
                 return
-            self._unchecked ^= {i}
-            self._fill_table()
-            self._update_counts()
+            near = self._nearest_curve(event)
+            if near is None:
+                return
+            if event.key == "control":
+                self._toggle_check(near[0])
+            else:
+                self.state.select(near[0])  # дальше — on_selection_changed
+        elif event.button == 3:
+            near = self._nearest_curve(event)
+            if near is not None or self._highlight:
+                self._show_menu(near[0] if near is not None else None)
+
+    def _on_plot_motion(self, event):
+        if self._drag is not None:
+            if event.x is None:
+                return
+            # координаты берём и за пределами осей: линию можно дотянуть до края
+            x, y = self.ax.transData.inverted().transform((event.x, event.y))
+            if self._drag == "alpha":
+                self._set_alpha(y)
+            else:
+                {"x": self.spin_x, "a": self.spin_a, "b": self.spin_b}[self._drag].setValue(float(x))
+            return
+        # курсор-«двусторонняя стрелка» над линией, которую можно потянуть
+        handle = None if self._toolbar_busy() else self._handle_at(event)
+        shape = {"alpha": Qt.CursorShape.SizeVerCursor, "x": Qt.CursorShape.SizeHorCursor,
+                 "a": Qt.CursorShape.SizeHorCursor, "b": Qt.CursorShape.SizeHorCursor}.get(handle)
+        if shape != self._cursor:
+            self._cursor = shape
+            if shape is None:
+                self.plot.canvas.unsetCursor()
+            else:
+                self.plot.canvas.setCursor(shape)
+
+    def _on_plot_release(self, _event):
+        if self._drag is not None:
+            self._drag = None
+            self.readout.paused = False
+
+    # ------------------------------------------------- меню и действия
+    def _on_table_menu(self, pos):
+        index = self.table.indexAt(pos)
+        if index.isValid():
+            self._show_menu(self._row_index(index.row()))
+        elif self._highlight:
+            self._show_menu(None)
+
+    def _show_menu(self, i: int | None):
+        """Меню по правому щелчку на кривой или строке (i = None — щелчок мимо величин)."""
+        fs = self.state.fset
+        menu = QMenu(self)
+        act_select = act_check = act_pin = None
+        if i is not None:
+            u = fs[i]
+            menu.addAction(f"{u.name}   T({u.x0:.2f}; {u.s:.2f}; {u.nu:g})").setEnabled(False)
+            menu.addSeparator()
+            act_select = menu.addAction("Сделать выбранной")
+            act_select.setEnabled(i != self.state.selected)
+            if self.mask[i]:
+                act_check = menu.addAction("Включить в подмножество" if i in self._unchecked
+                                           else "Исключить из подмножества")
+            else:
+                menu.addAction("Не подходит под отбор — в подмножество не войдёт").setEnabled(False)
+            act_pin = menu.addAction("Снять подсветку" if i in self._highlight else "Закрепить подсветку")
+        act_clear = None
+        if self._highlight:
+            menu.addSeparator()
+            act_clear = menu.addAction("Снять всю подсветку")
+        chosen = menu.exec(QCursor.pos())
+        if chosen is None:
+            return
+        if chosen is act_select:
+            self.state.select(i)
+        elif chosen is act_check:
+            self._toggle_check(i)
+        elif chosen is act_pin:
+            self._toggle_pin(i)
+        elif chosen is act_clear:
+            self._highlight.clear()
+            self._update_swatches()
             self._draw()
-            self._scroll_to(i)
+
+    def _toggle_check(self, i: int):
+        """Включить / исключить подходящую величину из подмножества."""
+        if not self.mask[i]:
+            return
+        self._unchecked ^= {i}
+        self._fill_table()
+        self._update_counts()
+        self._draw()
+        self._scroll_to(i)
+
+    def _toggle_pin(self, i: int):
+        """Закрепить / снять подсветку кривой. У каждой закреплённой — свой цвет из палитры."""
+        if i in self._highlight:
+            del self._highlight[i]
         else:
-            self.state.select(i)  # дальше — on_selection_changed
+            palette = highlight_palette()
+            free = [c for c in palette if c not in self._highlight.values()]
+            self._highlight[i] = free[0] if free else palette[len(self._highlight) % len(palette)]
+        self._update_swatches()
+        self._draw()
+
+    def _update_swatches(self):
+        """Цветные метки закреплённой подсветки перед именами в таблице."""
+        self.table.blockSignals(True)
+        for row in range(self.table.rowCount()):
+            self.table.item(row, NAME_COL).setIcon(swatch(self._highlight.get(self._row_index(row))))
+        self.table.blockSignals(False)
+
+    # ------------------------------------------------- мышь в таблице
+    def eventFilter(self, obj, event):
+        if obj is self.table.viewport():
+            kind = event.type()
+            if (kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                         QEvent.Type.MouseButtonDblClick)
+                    and event.button() == Qt.MouseButton.LeftButton):
+                index = self.table.indexAt(event.position().toPoint())
+                if index.isValid() and index.column() == CHECK_COL:
+                    # Галочку переключаем сами и событие дальше не отдаём: щелчок по галочке
+                    # не должен делать величину выбранной (это поменяло бы набор подходящих).
+                    if kind == QEvent.Type.MouseButtonPress:
+                        item = self.table.item(index.row(), CHECK_COL)
+                        checkable = Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+                        if item is not None and (item.flags() & checkable) == checkable:
+                            checked = item.checkState() == Qt.CheckState.Checked
+                            item.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+                    return True
+            elif kind == QEvent.Type.Leave:
+                self._set_hover(None)
+        return super().eventFilter(obj, event)
+
+    def _set_hover(self, i: int | None):
+        if i != self._hover:
+            self._hover = i
+            self._draw()
+
+    def _on_row_selected(self):
+        rows = self.table.selectionModel().selectedRows()
+        if rows:
+            i = self._row_index(rows[0].row())
+            # после выхода из обработчика: смена выбранной перестраивает таблицу,
+            # а делать это посреди обработки щелчка мышью по ней же небезопасно
+            QTimer.singleShot(0, lambda: self.state.select(i))
 
     def _scroll_to(self, index: int):
         for row in range(self.table.rowCount()):
@@ -439,8 +672,9 @@ class AlphaTab(QWidget):
                 self.table.scrollToItem(self.table.item(row, 0))
                 return
 
-    def _refresh(self):
-        """Пересчитать оценки величин по критерию (не зависят от α)."""
+    def _refresh(self, full: bool = True, defer_table: bool = False):
+        """Пересчитать оценки величин по критерию (не зависят от α).
+        full=False — фон графика не менялся, достаточно обновить динамический слой."""
         fs, v = self.state.fset, self.state.selected_value
         if len(fs) == 0:
             self.scores = np.empty(0)
@@ -452,8 +686,9 @@ class AlphaTab(QWidget):
             self.scores = fs.heights_with(v)
         else:
             self.scores = np.zeros(len(fs))
-        self._full = True  # мог измениться фон: окно [a; b], точка x*, режим
-        self._update_dynamic()
+        if full:
+            self._full = True
+        self._update_dynamic(defer_table)
 
     def _on_check_only(self):
         self._full = True  # «до/после среза» — серые кривые фона показываются или нет
@@ -477,7 +712,7 @@ class AlphaTab(QWidget):
 
     def _fill_table(self):
         """Таблица α-срезов. «До среза» — все величины (неподходящие серые, без галочки),
-        «после среза» — только подходящие. Галочки и выделение (подсветка) сохраняются."""
+        «после среза» — только подходящие. Выделенная строка — выбранная (красная) величина."""
         fs, tbl, alpha = self.state.fset, self.table, self.alpha()
         only = self.check_only.isChecked()
         rows = np.flatnonzero(self.mask) if only else np.arange(len(fs))
@@ -492,12 +727,24 @@ class AlphaTab(QWidget):
         for row, i in enumerate(rows):
             i = int(i)
             u, passed = fs[i], bool(self.mask[i])
+            check = QTableWidgetItem()
+            check.setData(Qt.ItemDataRole.UserRole, i)
+            # Флаги задаются явно: по умолчанию у ячейки Qt галочку можно поставить всегда,
+            # и щелчок по пустой клетке неподходящей величины «включал» её.
+            if passed:
+                check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                               | Qt.ItemFlag.ItemIsUserCheckable)
+                check.setCheckState(Qt.CheckState.Unchecked if i in self._unchecked else Qt.CheckState.Checked)
+                check.setToolTip("Исключена из подмножества" if i in self._unchecked else "Войдёт в подмножество")
+            else:
+                # квадратик виден всегда, но у неподходящей величины он бледный и не нажимается
+                check.setFlags(Qt.ItemFlag.ItemIsSelectable)
+                check.setCheckState(Qt.CheckState.Unchecked)
+                check.setToolTip(f"Не подходит под отбор при α = {alpha:.3f} — в подмножество не войдёт")
             name = QTableWidgetItem(u.name)
             name.setData(Qt.ItemDataRole.UserRole, i)
-            name.setIcon(swatch(self._highlight.get(i)))  # цветная метка выделенной величины
-            if passed:
-                name.setCheckState(Qt.CheckState.Unchecked if i in self._unchecked else Qt.CheckState.Checked)
-            cells = [name, NumItem(u.x0), NumItem(u.s), NumItem(u.nu, 2), NumItem(self.scores[i]),
+            name.setIcon(swatch(self._highlight.get(i)))  # цветная метка закреплённой подсветки
+            cells = [check, name, NumItem(u.x0), NumItem(u.s), NumItem(u.nu, 2), NumItem(self.scores[i]),
                      NumItem(u.x0 - half[i]), NumItem(u.x0 + half[i]), NumItem(2 * half[i])]
             for col, item in enumerate(cells):
                 if not passed:
@@ -509,11 +756,10 @@ class AlphaTab(QWidget):
                 name.setFont(font)
                 name.setForeground(selected_brush)
         tbl.setSortingEnabled(True)  # заново сортирует по выбранному столбцу
-        sel = tbl.selectionModel()
-        flags = sel.SelectionFlag.Select | sel.SelectionFlag.Rows
-        for row in range(tbl.rowCount()):
-            if self._row_index(row) in self._highlight:
-                sel.select(tbl.model().index(row, 0), flags)
+        for row in range(tbl.rowCount()):  # строка выбранной величины — выделена
+            if self._row_index(row) == self.state.selected:
+                tbl.selectRow(row)
+                break
         tbl.blockSignals(False)
         view = "после среза — только подходящие" if only else "до среза — все величины"
         self.table_box.setTitle(f"α-срезы величин при α = {alpha:.3f} ({view})")
@@ -570,24 +816,6 @@ class AlphaTab(QWidget):
         self._update_counts()
         self._draw()
 
-    def _on_highlight(self):
-        """Выделение строк → подсветка кривых. У каждой выделенной величины свой цвет;
-        уже выделенные свои цвета сохраняют, новым достаётся первый свободный цвет палитры."""
-        rows = sorted(index.row() for index in self.table.selectionModel().selectedRows())
-        selected = [self._row_index(row) for row in rows]
-        kept = {i: c for i, c in self._highlight.items() if i in selected}
-        palette = highlight_palette()
-        for i in selected:
-            if i not in kept:
-                free = [c for c in palette if c not in kept.values()]
-                kept[i] = free[0] if free else palette[len(kept) % len(palette)]
-        self._highlight = kept
-        self.table.blockSignals(True)
-        for row in range(self.table.rowCount()):
-            self.table.item(row, 0).setIcon(swatch(self._highlight.get(self._row_index(row))))
-        self.table.blockSignals(False)
-        self._draw()
-
     def _flags(self, indices: set[int]) -> np.ndarray:
         """Маска величин из набора индексов."""
         flags = np.zeros(len(self.mask), dtype=bool)
@@ -607,6 +835,10 @@ class AlphaTab(QWidget):
         self.lc_off.set_segments(self.segments[off])
         self.lc_hl.set_segments(self.segments[[i for i, _c in hl]] if hl else [])
         self.lc_hl.set_color([c for _i, c in hl] or theme.color("highlight"))
+        hov = self._hover  # строка таблицы под курсором (выбранная и так видна красной)
+        show_hover = (hov is not None and hov < n and hov != self.state.selected
+                      and (bool(self.mask[hov]) or not only))
+        self.lc_hover.set_segments(self.segments[[hov]] if show_hover else [])
         self.line_alpha.set_ydata([alpha, alpha])
         mode = self.combo_mode.currentIndex()
         self._update_legend(mode, v is not None, bool(off.any()), tuple((fs[i].name, c) for i, c in hl))

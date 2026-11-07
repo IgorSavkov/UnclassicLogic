@@ -206,6 +206,7 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow, QComboBox::down-arrow {{ image
 QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled, QSpinBox::down-arrow:disabled,
 QDoubleSpinBox::down-arrow:disabled, QComboBox::down-arrow:disabled {{ image: none; }}
 QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: 22px; border: none; }}
+QComboBox QLineEdit {{ border: none; padding: 0px; background: transparent; min-height: 0px; }}
 QComboBox QAbstractItemView {{ border: 1px solid {border}; border-radius: 6px; padding: 4px; outline: 0; }}
 
 QCheckBox::indicator, QRadioButton::indicator {{ width: 15px; height: 15px; }}
