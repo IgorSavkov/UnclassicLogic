@@ -8,7 +8,7 @@ from fuzzy_student import FuzzySet, Journal, StudentFuzzy
 
 class AppState(QObject):
     set_changed = pyqtSignal()           # множество заменено или изменено
-    selection_changed = pyqtSignal(int)  # выбрана другая величина (индекс)
+    selection_changed = pyqtSignal(int)  # выбрана другая величина (индекс; -1 — не выбрана)
 
     def __init__(self, journal: Journal):
         super().__init__()
@@ -36,7 +36,8 @@ class AppState(QObject):
         else:
             self.full_set = None
         self.fset = fset
-        self.selected = selected if 0 <= selected < len(fset) else (0 if len(fset) else -1)
+        # selected = -1 — величина не выбрана
+        self.selected = selected if -1 <= selected < len(fset) else (0 if len(fset) else -1)
         if message:
             self.log(message)
         self.set_changed.emit()
@@ -66,6 +67,7 @@ class AppState(QObject):
         self.selection_changed.emit(self.selected)
 
     def select(self, index: int):
-        if index != self.selected and 0 <= index < len(self.fset):
+        """Выбрать величину по индексу; -1 — снять выбор."""
+        if index != self.selected and -1 <= index < len(self.fset):
             self.selected = index
             self.selection_changed.emit(index)
