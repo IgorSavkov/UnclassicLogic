@@ -288,7 +288,7 @@ class ClusterTab(QWidget):
                               va="bottom", fontsize=8))
         self.ax_tree.set_title(f"Дендрограмма — метод {METHODS[ca.method]}")
         self.ax_tree.set_ylabel("расстояние между кластерами")
-        self.ax_tree.set_xlabel(f"{ca.n} величин (листья дерева)")
+        self.ax_tree.set_xlabel(f"величин: {ca.n} (листья дерева)")  # «32 величин» было бы с ошибкой
 
         # Все точки — одной коллекцией: при 200 кластерах 200 отдельных scatter рисовались секундами.
         groups = ca.groups(labels)
